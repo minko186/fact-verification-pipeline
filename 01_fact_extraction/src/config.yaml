@@ -1,0 +1,56 @@
+# ── Model ──────────────────────────────────────────────────────────────────────
+model:
+  name: "google/flan-t5-base"
+  type: "seq2seq"          # seq2seq (T5/FLAN-T5/BART) — extend for causal later
+  hub_model_id: "minko186/flan-t5-base-fact-extraction-v2"
+
+# ── Prompt ─────────────────────────────────────────────────────────────────────
+prompt:
+  template: "extract fact: {evidence} Based on this, what is the claim?"
+  max_input_length: 512
+  max_output_length: 128
+
+# ── Datasets ───────────────────────────────────────────────────────────────────
+# Each entry is a HF Hub dataset that has "evidence" and "claim" columns.
+# sample_size: 0 means use the full dataset.
+datasets:
+  - id: "minko186/fever-fact-extraction-supports"
+    sample_size: 10000
+  - id: "minko186/vitaminc-fact-extraction"
+    sample_size: 8000
+  - id: "minko186/wice-fact-extraction"
+    sample_size: 0
+
+# ── Data Paths ─────────────────────────────────────────────────────────────────
+# prepare.py saves tokenized data to processed_dir/run_name/
+# Change run_name when switching model or dataset combo to keep artifacts separate.
+data:
+  processed_dir: "../../data/processed/fact_extraction"
+  run_name: "flan-t5-base-fever-vitaminc-wice"
+
+# ── Training ───────────────────────────────────────────────────────────────────
+training_args:
+  output_dir: "../../models/flan-t5-base-fact-extraction-v2"
+  per_device_train_batch_size: 8
+  per_device_eval_batch_size: 8
+  predict_with_generate: true
+  eval_strategy: "steps"
+  eval_steps: 500
+  save_strategy: "steps"
+  save_steps: 500
+  learning_rate: 0.0003
+  num_train_epochs: 3
+  save_total_limit: 2
+  fp16: false
+  bf16: false
+  gradient_checkpointing: false
+  push_to_hub: true
+
+# ── Inference ──────────────────────────────────────────────────────────────────
+inference:
+  num_beams: 4
+
+# ── Evaluation ─────────────────────────────────────────────────────────────────
+evaluation:
+  metrics: ["rouge", "bertscore"]
+  bertscore_model: "microsoft/deberta-xlarge-mnli"

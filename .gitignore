@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Model checkpoints and large binaries
+models/
+
+# Processed data (Arrow files, indexes)
+data/processed/
+
+# Raw large files (keep train.jsonl as it's 32MB, exclude wiki-pages.zip at 1.6GB)
+data/raw/fever/wiki-pages.zip
+data/raw/HaluEval/
+data/raw/LibreEval/
+
+# Experiment tracking
+experiments/wandb/
+*.wandb
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Secrets
+.env
+*.key

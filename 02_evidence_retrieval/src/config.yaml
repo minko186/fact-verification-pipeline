@@ -1,0 +1,49 @@
+# ── Corpus ────────────────────────────────────────────────────────────────────
+corpus:
+  wiki_zip_path: "../../data/raw/fever/wiki-pages.zip"
+  records_path:  "../../data/processed/evidence_retrieval/sentence_records.jsonl"
+  min_sentence_length: 10
+  use_hf_wikipedia: false
+
+# ── Index Storage ─────────────────────────────────────────────────────────────
+index:
+  bm25_path:         "../../data/processed/evidence_retrieval/bm25_index.pkl"
+  chroma_path:       "../../data/processed/evidence_retrieval/chroma_db"
+  chroma_collection: "wikipedia_facts"
+  graph_path:        "../../data/processed/evidence_retrieval/entity_graph.graphml"
+
+# ── Embedding Model ──────────────────────────────────────────────────────────
+embedding:
+  model_name: "sentence-transformers/all-mpnet-base-v2"
+  batch_size:  512
+  device:      "cuda"
+
+# ── Retrieval ────────────────────────────────────────────────────────────────
+retrieval:
+  bm25_top_k:     100
+  dense_top_k:    100
+  graph_top_k:    100
+  graph_max_hops:   2
+
+# ── Fusion ───────────────────────────────────────────────────────────────────
+fusion:
+  rrf_k:               60
+  candidate_pool_size: 200
+
+# ── Reranker ─────────────────────────────────────────────────────────────────
+reranker:
+  model_name:  "cross-encoder/nli-deberta-v3-base"
+  device:      "cuda"
+  batch_size:   32
+  final_top_n:  10
+
+# ── Output ───────────────────────────────────────────────────────────────────
+output:
+  results_dir: "../../data/processed/evidence_retrieval/results"
+  run_name:    "fever-wiki-hybrid-v1"
+
+# ── Evaluation ───────────────────────────────────────────────────────────────
+evaluation:
+  fever_train_path: "../../data/raw/fever/train.jsonl"
+  recall_k_values: [5, 10, 20]
+  eval_results_dir: "../../experiments/eval_results"
