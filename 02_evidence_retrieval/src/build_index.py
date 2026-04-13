@@ -1,11 +1,19 @@
 """
-CLI entry point: builds knowledge base indexes or downloads pre-built ones from HF Hub.
+CLI entry point: builds knowledge base indexes or syncs them with HuggingFace Hub.
 
 Usage:
     python build_index.py                              # Build everything locally
     python build_index.py --skip-parse                 # Reuse existing sentence_records.jsonl
     python build_index.py --skip-dense --skip-graph    # Only rebuild BM25
-    python build_index.py --from-hub                   # Download pre-built indexes from HF
+
+    python build_index.py --from-hub                   # Download all indexes from HF Hub
+    python build_index.py --push-to-hub                # Build everything, then upload to HF Hub
+    python build_index.py --skip-parse --skip-bm25 \\
+        --skip-dense --skip-graph --push-to-hub        # Upload existing local indexes (no rebuild)
+
+HF Hub repos (configured in config.yaml hub section):
+    minko186/fever-evidence-retrieval-kb    — FAISS, BM25, graph indexes
+    minko186/fever-wiki-sentences           — sentence_records.jsonl
 """
 
 import argparse
@@ -28,75 +36,137 @@ def resolve_path(base_dir, path):
     return os.path.normpath(os.path.join(base_dir, path))
 
 
+def _hub_download_file(repo_id, filename, local_path, repo_type, token):
+    """Download a single file from HF Hub to local_path if not already present."""
+    from huggingface_hub import hf_hub_download
+
+    local_dir = os.path.dirname(local_path)
+    os.makedirs(local_dir, exist_ok=True)
+
+    if os.path.exists(local_path):
+        print(f"  Already exists: {local_path}")
+        return
+
+    print(f"  Downloading {filename} from {repo_id}...")
+    hf_hub_download(
+        repo_id=repo_id,
+        filename=filename,
+        repo_type=repo_type,
+        local_dir=local_dir,
+        token=token,
+    )
+    # hf_hub_download saves to local_dir/<filename>; rename if needed
+    downloaded = os.path.join(local_dir, filename)
+    if os.path.abspath(downloaded) != os.path.abspath(local_path):
+        os.rename(downloaded, local_path)
+    print(f"  -> {local_path}")
+
+
 def download_from_hub(config):
-    """Download pre-built KB indexes from HuggingFace Hub."""
-    from huggingface_hub import hf_hub_download, get_token
+    """Download all pre-built KB indexes from HuggingFace Hub."""
+    from huggingface_hub import get_token
 
     hub_cfg = config.get("hub", {})
     kb_repo = hub_cfg.get("kb_repo_id", "minko186/fever-evidence-retrieval-kb")
     records_repo = hub_cfg.get("records_dataset_id", "minko186/fever-wiki-sentences")
     token = get_token()
 
-    # Download sentence records
-    records_path = config["corpus"]["records_path"]
-    records_dir = os.path.dirname(records_path)
-    os.makedirs(records_dir, exist_ok=True)
+    print(f"\n[1/4] Sentence records  ({records_repo})")
+    _hub_download_file(
+        repo_id=records_repo,
+        filename="sentence_records.jsonl",
+        local_path=config["corpus"]["records_path"],
+        repo_type="dataset",
+        token=token,
+    )
 
-    if not os.path.exists(records_path):
-        print(f"Downloading sentence records from {records_repo}...")
-        hf_hub_download(
-            repo_id=records_repo,
-            filename="sentence_records.jsonl",
-            repo_type="dataset",
-            local_dir=records_dir,
-            token=token,
-        )
-        downloaded = os.path.join(records_dir, "sentence_records.jsonl")
-        if os.path.abspath(downloaded) != os.path.abspath(records_path):
-            os.rename(downloaded, records_path)
-        print(f"  -> {records_path}")
-    else:
-        print(f"Sentence records already exist: {records_path}")
+    print(f"\n[2/4] FAISS dense index  ({kb_repo})")
+    faiss_base = os.path.splitext(config["index"]["faiss_path"])[0]
+    try:
+        for fname, local in [
+            ("faiss_index.faiss",      config["index"]["faiss_path"]),
+            ("faiss_index_ids.pkl",    faiss_base + "_ids.pkl"),
+            ("faiss_index_meta.json",  faiss_base + "_meta.json"),
+        ]:
+            _hub_download_file(kb_repo, fname, local, "dataset", token)
+    except Exception as e:
+        print(f"  FAISS index not available on Hub (optional): {e}")
 
-    # Download FAISS index + supporting files
-    faiss_path = config["index"]["faiss_path"]
-    faiss_dir = os.path.dirname(faiss_path)
-    os.makedirs(faiss_dir, exist_ok=True)
+    print(f"\n[3/4] BM25 sparse index  ({kb_repo})")
+    bm25_fname = os.path.basename(config["index"]["bm25_path"])
+    try:
+        _hub_download_file(kb_repo, bm25_fname, config["index"]["bm25_path"], "dataset", token)
+    except Exception as e:
+        print(f"  BM25 not available on Hub (optional): {e}")
 
-    faiss_files = ["faiss_index.faiss", "faiss_index_ids.pkl", "faiss_index_meta.json"]
-    for fname in faiss_files:
-        local = os.path.join(faiss_dir, fname)
-        if not os.path.exists(local):
-            print(f"Downloading {fname} from {kb_repo}...")
-            hf_hub_download(
-                repo_id=kb_repo,
-                filename=fname,
-                repo_type="dataset",
-                local_dir=faiss_dir,
-                token=token,
-            )
-            print(f"  -> {local}")
-        else:
-            print(f"Already exists: {local}")
-
-    # Optionally download BM25 index
-    bm25_path = config["index"]["bm25_path"]
-    if not os.path.exists(bm25_path):
-        bm25_fname = os.path.basename(bm25_path)
-        try:
-            print(f"Downloading {bm25_fname} from {kb_repo}...")
-            hf_hub_download(
-                repo_id=kb_repo,
-                filename=bm25_fname,
-                repo_type="dataset",
-                local_dir=os.path.dirname(bm25_path),
-                token=token,
-            )
-            print(f"  -> {bm25_path}")
-        except Exception as e:
-            print(f"  BM25 index not available on Hub (optional): {e}")
+    print(f"\n[4/4] Graph index  ({kb_repo})")
+    graph_base = os.path.splitext(config["index"]["graph_path"])[0]
+    graph_sentences_path = graph_base + "_sentences.pkl"
+    graph_fname = os.path.basename(config["index"]["graph_path"])
+    graph_sentences_fname = os.path.basename(graph_sentences_path)
+    try:
+        _hub_download_file(kb_repo, graph_fname, config["index"]["graph_path"], "dataset", token)
+        _hub_download_file(kb_repo, graph_sentences_fname, graph_sentences_path, "dataset", token)
+    except Exception as e:
+        print(f"  Graph index not available on Hub (optional): {e}")
 
     print("\nAll KB artifacts downloaded from Hub.")
+
+
+def upload_to_hub(config):
+    """Upload all built KB indexes to HuggingFace Hub."""
+    from huggingface_hub import HfApi, get_token
+
+    hub_cfg = config.get("hub", {})
+    kb_repo = hub_cfg.get("kb_repo_id", "minko186/fever-evidence-retrieval-kb")
+    records_repo = hub_cfg.get("records_dataset_id", "minko186/fever-wiki-sentences")
+    token = get_token()
+    api = HfApi(token=token)
+
+    def _ensure_repo(repo_id, repo_type):
+        try:
+            api.repo_info(repo_id=repo_id, repo_type=repo_type)
+        except Exception:
+            print(f"  Creating repo {repo_id} ({repo_type})...")
+            api.create_repo(repo_id=repo_id, repo_type=repo_type, private=False)
+
+    def _upload(local_path, repo_id, repo_type, description=""):
+        if not os.path.exists(local_path):
+            print(f"  Skipping {local_path} (not found)")
+            return
+        fname = os.path.basename(local_path)
+        size_mb = os.path.getsize(local_path) / 1024 / 1024
+        print(f"  Uploading {fname} ({size_mb:.1f} MB) -> {repo_id}...")
+        api.upload_file(
+            path_or_fileobj=local_path,
+            path_in_repo=fname,
+            repo_id=repo_id,
+            repo_type=repo_type,
+            commit_message=f"Upload {fname}" + (f" — {description}" if description else ""),
+        )
+
+    print(f"\n[1/4] Sentence records  -> {records_repo}")
+    _ensure_repo(records_repo, "dataset")
+    _upload(config["corpus"]["records_path"], records_repo, "dataset", "FEVER wiki sentence records")
+
+    print(f"\n[2/4] FAISS dense index  -> {kb_repo}")
+    _ensure_repo(kb_repo, "dataset")
+    faiss_base = os.path.splitext(config["index"]["faiss_path"])[0]
+    _upload(config["index"]["faiss_path"],        kb_repo, "dataset", "FAISS IVF-PQ index")
+    _upload(faiss_base + "_ids.pkl",              kb_repo, "dataset", "FAISS sentence ID mapping")
+    _upload(faiss_base + "_meta.json",            kb_repo, "dataset", "FAISS index metadata")
+
+    print(f"\n[3/4] BM25 sparse index  -> {kb_repo}")
+    _upload(config["index"]["bm25_path"], kb_repo, "dataset", "BM25Okapi index")
+
+    print(f"\n[4/4] Graph index  -> {kb_repo}")
+    graph_base = os.path.splitext(config["index"]["graph_path"])[0]
+    _upload(config["index"]["graph_path"],        kb_repo, "dataset", "entity co-occurrence graph (GraphML)")
+    _upload(graph_base + "_sentences.pkl",        kb_repo, "dataset", "article->sentence_id mapping")
+
+    print(f"\nAll KB artifacts uploaded.")
+    print(f"  Dense + sparse + graph: https://huggingface.co/datasets/{kb_repo}")
+    print(f"  Sentence records:        https://huggingface.co/datasets/{records_repo}")
 
 
 def main():
@@ -107,6 +177,12 @@ def main():
     parser.add_argument("--skip-dense", action="store_true", help="Skip dense (FAISS) index build")
     parser.add_argument("--skip-graph", action="store_true", help="Skip graph index build")
     parser.add_argument("--from-hub", action="store_true", help="Download pre-built indexes from HF Hub instead of building locally")
+    parser.add_argument("--push-to-hub", action="store_true", help="Upload all built KB indexes to HF Hub after building (or standalone)")
+    parser.add_argument(
+        "--push-only",
+        action="store_true",
+        help="Only upload existing local files to HF Hub (no build, no loading of sentence records)",
+    )
     args = parser.parse_args()
 
     config_path = os.path.abspath(args.config)
@@ -124,6 +200,10 @@ def main():
 
     if args.from_hub:
         download_from_hub(config)
+        return
+
+    if args.push_only:
+        upload_to_hub(config)
         return
 
     total_start = time.time()
@@ -176,6 +256,9 @@ def main():
 
     total_elapsed = time.time() - total_start
     print(f"\nAll indexes built in {total_elapsed:.1f}s")
+
+    if args.push_to_hub:
+        upload_to_hub(config)
 
 
 if __name__ == "__main__":

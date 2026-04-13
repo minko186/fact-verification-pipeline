@@ -180,7 +180,7 @@ Retrieves evidence sentences from a Wikipedia knowledge base that can either sup
 | Index | Library | Purpose |
 |-------|---------|---------|
 | BM25 (sparse) | `rank_bm25` | Lexical matching — good for names, dates, numbers |
-| Dense (semantic) | `sentence-transformers` + ChromaDB | Semantic similarity — catches paraphrases |
+| Dense (semantic) | `sentence-transformers` + FAISS | Semantic similarity — catches paraphrases |
 | Graph (structural) | NetworkX | Entity co-occurrence — finds related articles via BFS |
 
 **Two-Stage Retrieval**:
@@ -189,11 +189,78 @@ Retrieves evidence sentences from a Wikipedia knowledge base that can either sup
 
 2. **Stage 2 — NLI reranking**: A cross-encoder NLI model (`cross-encoder/nli-deberta-v3-base`) scores each `(claim, candidate)` pair. The key insight is **stance-neutral scoring**: relevance = P(ENTAILMENT) + P(CONTRADICTION). This ensures both supporting and refuting evidence ranks above unrelated text — only truly neutral (off-topic) evidence is filtered out.
 
+### Knowledge Base on HuggingFace Hub
+
+Pre-built KB artifacts are hosted on HF so any machine can pull them without rebuilding from the raw wiki dump.
+
+| HF Repo | Contents |
+|---------|----------|
+| [`minko186/fever-wiki-sentences`](https://huggingface.co/datasets/minko186/fever-wiki-sentences) | `sentence_records.jsonl` — parsed FEVER wiki sentences |
+| [`minko186/fever-evidence-retrieval-kb`](https://huggingface.co/datasets/minko186/fever-evidence-retrieval-kb) | FAISS index, BM25 pickle, GraphML + sentence mapping |
+
+**Pull all indexes to a new machine (fastest path):**
+
+```bash
+cd 02_evidence_retrieval/src
+python build_index.py --from-hub
+```
+
+**Build from scratch and push to Hub:**
+
+`sentence_records.jsonl` is already on HF — no need for `wiki-pages.zip`. Run from the
+repo root. Uses the `ai-writer` conda environment which has all required packages.
+
+```bash
+cd 02_evidence_retrieval/src
+mkdir -p ../../logs
+
+# Step 1 — download sentence_records.jsonl from HF (skip wiki-pages.zip entirely)
+nohup python -c "
+from huggingface_hub import hf_hub_download; import shutil, os
+out = hf_hub_download(repo_id='minko186/fever-wiki-sentences',
+    filename='sentence_records.jsonl', repo_type='dataset',
+    local_dir='../../data/processed/evidence_retrieval')
+target = '../../data/processed/evidence_retrieval/sentence_records.jsonl'
+if os.path.abspath(out) != os.path.abspath(target): shutil.move(out, target)
+print('Done:', target)
+" > ../../logs/download_records.log 2>&1 &
+echo "Download PID: $!" && tail -f ../../logs/download_records.log
+
+# Step 2 — build BM25 + FAISS + graph, push everything to Hub
+# Runtime: BM25 ~7 min, FAISS ~38 h on CPU (use GPU machine to reduce to ~1 h),
+#          graph ~30–60 min with Aho-Corasick. Total: ~40 h CPU / ~2 h GPU.
+nohup env OMP_NUM_THREADS=44 MKL_NUM_THREADS=44 TOKENIZERS_PARALLELISM=false \
+  /home/minko/miniconda3/envs/ai-writer/bin/python -u build_index.py \
+  --skip-parse --push-to-hub \
+  > ../../logs/build_and_push.log 2>&1 &
+echo "Build PID: $!" && tail -f ../../logs/build_and_push.log
+```
+
+**Re-upload already-built local indexes without rebuilding:**
+
+```bash
+cd 02_evidence_retrieval/src
+nohup /home/minko/miniconda3/envs/ai-writer/bin/python -u build_index.py \
+  --skip-parse --skip-bm25 --skip-dense --skip-graph \
+  --push-to-hub \
+  > ../../logs/push_hub.log 2>&1 &
+echo "Upload PID: $!" && tail -f ../../logs/push_hub.log
+```
+
+**Monitor a running build:**
+
+```bash
+tail -f 02_evidence_retrieval/logs/build_and_push.log
+# Or check the process:
+ps aux | grep build_index
+```
+
 ### Configuration
 
 Edit `02_evidence_retrieval/src/config.yaml` to configure:
 - **Corpus**: Path to wiki-pages.zip, sentence records output path
-- **Indexes**: Storage paths for BM25, ChromaDB, and GraphML files
+- **Hub**: HF repo IDs for KB artifacts and sentence dataset
+- **Indexes**: Storage paths for FAISS, BM25, and GraphML files
 - **Embedding model**: Sentence-transformer model name and batch size
 - **Retrieval**: Top-k per channel, graph hop depth
 - **Fusion**: RRF k parameter, candidate pool size
@@ -204,7 +271,10 @@ Edit `02_evidence_retrieval/src/config.yaml` to configure:
 ```bash
 cd 02_evidence_retrieval/src
 
-# 1. Build all knowledge base indexes (skip flags available)
+# 1a. Download pre-built indexes from Hub (preferred)
+python build_index.py --from-hub
+
+# 1b. Build all KB indexes locally (requires wiki-pages.zip)
 python build_index.py
 python build_index.py --skip-parse --skip-bm25   # rebuild only dense + graph
 

@@ -4,6 +4,7 @@ import pickle
 from collections import defaultdict
 from itertools import combinations
 
+import ahocorasick
 import networkx as nx
 
 from .parse_wiki import SentenceRecord
@@ -39,35 +40,34 @@ class GraphIndex:
 
         self._article_sentences = dict(article_sentences)
 
-        # Build a normalized lookup: lowercase title -> original title
+        # Build a normalized lookup: lowercase-with-spaces title -> original title
         title_lower = {}
         for t in title_set:
-            # FEVER titles use underscores for spaces
             normalized = t.replace("_", " ").lower()
-            title_lower[normalized] = t
+            if len(normalized) >= 3:
+                title_lower[normalized] = t
 
         G = nx.Graph()
-
-        # Add all articles as nodes
         for title in title_set:
             G.add_node(title)
 
-        # Scan sentences for mentions of other article titles
-        print("Scanning sentences for entity co-occurrences...")
+        # Build an Aho-Corasick automaton over all normalized titles so each
+        # sentence is scanned in O(len(sentence)) rather than O(n_titles).
+        print(f"Building Aho-Corasick automaton over {len(title_lower):,} titles...")
+        A = ahocorasick.Automaton()
+        for norm_title, orig_title in title_lower.items():
+            A.add_word(norm_title, orig_title)
+        A.make_automaton()
+        print("Automaton ready. Scanning sentences for entity co-occurrences...")
+
         edge_counts = defaultdict(int)
 
         for rec in records:
             text_lower = rec.text.lower()
-            # Find which other article titles are mentioned in this sentence
-            mentioned_titles = set()
-            mentioned_titles.add(rec.article_title)
+            mentioned_titles = {rec.article_title}
 
-            for norm_title, orig_title in title_lower.items():
-                if orig_title == rec.article_title:
-                    continue
-                if len(norm_title) < 3:
-                    continue
-                if norm_title in text_lower:
+            for _, orig_title in A.iter(text_lower):
+                if orig_title != rec.article_title:
                     mentioned_titles.add(orig_title)
 
             # Create edges between all co-mentioned titles
