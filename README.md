@@ -30,7 +30,7 @@ fact-verification-pipeline/
 |   |   +-- config.yaml
 |   |   +-- prepare.py              # Tokenize datasets -> Arrow files
 |   |   +-- train.py                # Fine-tune FLAN-T5 (seq2seq)
-|   |   +-- evaluate.py             # ROUGE + BERTScore evaluation
+|   |   +-- run_evaluation.py       # ROUGE + BERTScore evaluation
 |   |   +-- inference.py            # Generate claims from evidence
 |   |   +-- preprocessors/          # Per-dataset preprocessing
 |   |   |   +-- preprocess_fever.py
@@ -155,7 +155,7 @@ python prepare.py
 python train.py
 
 # 4. Evaluate (ROUGE + BERTScore)
-python evaluate.py
+python run_evaluation.py
 
 # 5. Run inference on new text
 python inference.py
@@ -344,7 +344,7 @@ cd 01_fact_extraction/src
 python preprocessors/preprocess_fever.py --repo minko186/fever-fact-extraction-supports
 python prepare.py
 python train.py
-python evaluate.py
+python run_evaluation.py
 python inference.py   # generates claims from evidence text
 
 # ── Stage 2: Evidence Retrieval ──────────────────────────────────────────────

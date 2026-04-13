@@ -30,10 +30,12 @@ data/processed/
 
 # Raw large files (keep train.jsonl as it's 32MB, exclude wiki-pages.zip at 1.6GB)
 data/raw/fever/wiki-pages.zip
+data/raw/scifact/
 data/raw/HaluEval/
 data/raw/LibreEval/
 
 # Experiment tracking
+experiments/logs/
 experiments/wandb/
 *.wandb
 

@@ -1,5 +1,23 @@
+"""
+Dense retrieval index backed by FAISS with sentence-transformers embeddings.
+
+Build workflow:
+    1. Encode all sentence records with a sentence-transformer model on GPU.
+    2. Train an IVF-PQ FAISS index on a sample, then add all vectors.
+    3. Save index.faiss + sentence_ids.pkl to disk.
+
+Query workflow:
+    1. Encode the claim.
+    2. Search the FAISS index for nearest neighbors.
+    3. Return (sentence_id, distance) pairs.
+"""
+
+import json
 import os
-import chromadb
+import pickle
+
+import faiss
+import numpy as np
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
@@ -8,15 +26,14 @@ from .parse_wiki import SentenceRecord
 
 class DenseIndex:
     def __init__(self, config):
-        self.chroma_path = config["index"]["chroma_path"]
-        self.collection_name = config["index"]["chroma_collection"]
+        self.faiss_path = config["index"]["faiss_path"]
         self.model_name = config["embedding"]["model_name"]
-        self.batch_size = config["embedding"].get("batch_size", 512)
+        self.batch_size = config["embedding"].get("batch_size", 2048)
         self.device = config["embedding"].get("device", "cuda")
 
         self._model = None
-        self._collection = None
-        self._client = None
+        self._index = None
+        self._sentence_ids = []
 
     def _get_model(self):
         if self._model is None:
@@ -24,78 +41,108 @@ class DenseIndex:
             self._model = SentenceTransformer(self.model_name, device=self.device)
         return self._model
 
-    def _get_client(self):
-        if self._client is None:
-            os.makedirs(self.chroma_path, exist_ok=True)
-            self._client = chromadb.PersistentClient(path=self.chroma_path)
-        return self._client
-
     def build(self, records):
         """
-        Embed all sentence records and store in a persistent ChromaDB collection.
+        Encode all records and build a compressed FAISS IVF-PQ index.
         """
         model = self._get_model()
-        client = self._get_client()
-
-        # Delete existing collection if it exists, to rebuild cleanly
-        try:
-            client.delete_collection(self.collection_name)
-        except ValueError:
-            pass
-
-        collection = client.create_collection(
-            name=self.collection_name,
-            metadata={"hnsw:space": "cosine"},
-        )
-
+        dim = model.get_sentence_embedding_dimension()
         total = len(records)
-        print(f"Embedding and indexing {total:,} sentences (batch_size={self.batch_size})...")
 
-        for start in tqdm(range(0, total, self.batch_size), desc="Indexing"):
-            batch = records[start : start + self.batch_size]
-            texts = [r.text for r in batch]
-            ids = [r.sentence_id for r in batch]
-            metadatas = [{"article": r.article_title, "line": r.line_number} for r in batch]
+        self._sentence_ids = [r.sentence_id for r in records]
 
-            embeddings = model.encode(texts, show_progress_bar=False).tolist()
+        print(f"Encoding {total:,} sentences (dim={dim}, batch_size={self.batch_size})...")
 
-            collection.add(
-                ids=ids,
-                embeddings=embeddings,
-                documents=texts,
-                metadatas=metadatas,
-            )
+        all_embeddings = []
+        for start in tqdm(range(0, total, self.batch_size), desc="Encoding"):
+            batch_texts = [r.text for r in records[start : start + self.batch_size]]
+            embs = model.encode(batch_texts, show_progress_bar=False, normalize_embeddings=True)
+            all_embeddings.append(embs.astype(np.float32))
 
-        self._collection = collection
-        print(f"Dense index built: {collection.count():,} vectors in {self.chroma_path}")
+        embeddings = np.vstack(all_embeddings)
+        print(f"Embeddings shape: {embeddings.shape}")
+
+        n_vectors = embeddings.shape[0]
+        # IVF-PQ parameters: nlist clusters, m sub-quantizers of nbits each
+        # nlist ~ sqrt(n) is a good rule of thumb, capped for practicality
+        nlist = min(int(np.sqrt(n_vectors)), 4096)
+        m = 48  # sub-quantizers (must divide dim=768 evenly: 768/48=16)
+        nbits = 8
+
+        print(f"Training IVF{nlist}_PQ{m}x{nbits} index on {min(n_vectors, 500_000):,} vectors...")
+        quantizer = faiss.IndexFlatIP(dim)
+        index = faiss.IndexIVFPQ(quantizer, dim, nlist, m, nbits, faiss.METRIC_INNER_PRODUCT)
+
+        # Train on a random sample for speed
+        train_size = min(n_vectors, 500_000)
+        if train_size < n_vectors:
+            rng = np.random.default_rng(42)
+            train_indices = rng.choice(n_vectors, size=train_size, replace=False)
+            train_vecs = embeddings[train_indices]
+        else:
+            train_vecs = embeddings
+
+        index.train(train_vecs)
+        print("Index trained. Adding vectors...")
+
+        # Add in chunks to avoid memory spikes
+        add_batch = 100_000
+        for start in tqdm(range(0, n_vectors, add_batch), desc="Adding to index"):
+            index.add(embeddings[start : start + add_batch])
+
+        index.nprobe = 32
+
+        # Save to disk
+        os.makedirs(os.path.dirname(self.faiss_path), exist_ok=True)
+        faiss.write_index(index, self.faiss_path)
+
+        ids_path = self.faiss_path.replace(".faiss", "_ids.pkl")
+        with open(ids_path, "wb") as f:
+            pickle.dump(self._sentence_ids, f)
+
+        meta_path = self.faiss_path.replace(".faiss", "_meta.json")
+        with open(meta_path, "w") as f:
+            json.dump({
+                "model_name": self.model_name,
+                "dim": dim,
+                "n_vectors": n_vectors,
+                "nlist": nlist,
+                "m": m,
+                "nbits": nbits,
+                "nprobe": 32,
+            }, f, indent=2)
+
+        self._index = index
+        print(f"FAISS index saved: {n_vectors:,} vectors -> {self.faiss_path}")
 
     def load(self):
-        """Open an existing persistent ChromaDB collection."""
-        client = self._get_client()
-        self._collection = client.get_collection(self.collection_name)
-        print(
-            f"Dense index loaded: {self._collection.count():,} vectors "
-            f"from {self.chroma_path}"
-        )
+        """Load a previously built FAISS index and sentence ID mapping."""
+        print(f"Loading FAISS index from {self.faiss_path}...")
+        self._index = faiss.read_index(self.faiss_path)
+        self._index.nprobe = 32
+
+        ids_path = self.faiss_path.replace(".faiss", "_ids.pkl")
+        with open(ids_path, "rb") as f:
+            self._sentence_ids = pickle.load(f)
+
+        print(f"FAISS index loaded: {self._index.ntotal:,} vectors")
 
     def query(self, claim, top_k=100):
         """
-        Embed the claim and query ChromaDB for nearest neighbors.
+        Embed the claim and search the FAISS index for nearest neighbors.
 
         Returns:
-            list of (sentence_id, cosine_distance) sorted ascending by distance.
-            Lower distance = more similar.
+            list of (sentence_id, similarity_score) sorted descending by score.
         """
         model = self._get_model()
-        embedding = model.encode([claim]).tolist()
+        q_emb = model.encode([claim], normalize_embeddings=True).astype(np.float32)
 
-        results = self._collection.query(
-            query_embeddings=embedding,
-            n_results=top_k,
-            include=["distances"],
-        )
+        scores, indices = self._index.search(q_emb, top_k)
 
-        ids = results["ids"][0]
-        distances = results["distances"][0]
+        results = []
+        for score, idx in zip(scores[0], indices[0]):
+            if idx < 0:
+                continue
+            results.append((self._sentence_ids[idx], float(score)))
 
-        return list(zip(ids, distances))
+        return results

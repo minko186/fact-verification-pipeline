@@ -81,6 +81,11 @@ def main():
                         help="HF Hub dataset repo to push to")
     parser.add_argument("--labels", nargs="+", default=["SUPPORTS"],
                         help="Labels to keep (e.g. SUPPORTS REFUTES)")
+    parser.add_argument(
+        "--save-to-disk",
+        default=None,
+        help="If set, save DatasetDict here instead of pushing to the Hub",
+    )
     args = parser.parse_args()
 
     fever_config = "v1.0" if args.version == "v1" else "v2.0"
@@ -111,8 +116,12 @@ def main():
     if "train" in result:
         print("Sample:", result["train"][0])
 
-    print(f"\nPushing to Hub: {args.repo}")
-    result.push_to_hub(args.repo)
+    if args.save_to_disk:
+        print(f"\nSaving to disk: {args.save_to_disk}")
+        result.save_to_disk(args.save_to_disk)
+    else:
+        print(f"\nPushing to Hub: {args.repo}")
+        result.push_to_hub(args.repo)
     print("Done.")
 
 

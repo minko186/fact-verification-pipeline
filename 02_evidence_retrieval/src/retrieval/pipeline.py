@@ -50,11 +50,11 @@ class EvidencePipeline:
         self.config["corpus"]["records_path"] = _resolve_path(
             base_dir, self.config["corpus"]["records_path"]
         )
+        self.config["index"]["faiss_path"] = _resolve_path(
+            base_dir, self.config["index"]["faiss_path"]
+        )
         self.config["index"]["bm25_path"] = _resolve_path(
             base_dir, self.config["index"]["bm25_path"]
-        )
-        self.config["index"]["chroma_path"] = _resolve_path(
-            base_dir, self.config["index"]["chroma_path"]
         )
         self.config["index"]["graph_path"] = _resolve_path(
             base_dir, self.config["index"]["graph_path"]

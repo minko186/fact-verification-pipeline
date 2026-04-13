@@ -22,7 +22,7 @@ from transformers import (
     Seq2SeqTrainingArguments,
     Seq2SeqTrainer,
 )
-from huggingface_hub import HfFolder
+from huggingface_hub import get_token
 
 
 def load_config(config_path="config.yaml"):
@@ -30,15 +30,36 @@ def load_config(config_path="config.yaml"):
         return yaml.safe_load(f)
 
 
+def _sanitize_token_ids_for_decode(ids: np.ndarray, tokenizer) -> np.ndarray:
+    """
+    Rust fast tokenizers reject out-of-range IDs (OverflowError / segfault).
+    Clip to valid vocab indices and use a concrete integer dtype.
+    """
+    ids = np.asarray(ids)
+    if ids.dtype.kind == "f":
+        ids = np.rint(ids).astype(np.int64)
+    else:
+        ids = ids.astype(np.int64, copy=False)
+    max_id = max(len(tokenizer) - 1, 0)
+    pad = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+    ids = np.where(ids < 0, pad, ids)
+    ids = np.clip(ids, 0, max_id)
+    return ids
+
+
 def make_compute_metrics(tokenizer, metric):
     """Return a compute_metrics function that closes over tokenizer and metric."""
     def compute_metrics(eval_preds):
         preds, labels = eval_preds
-        if isinstance(preds, tuple) or (hasattr(preds, "shape") and len(preds.shape) > 1):
+        preds = np.asarray(preds)
+        # Teacher-forcing logits (3D) vs. generated token ids (2D) from predict_with_generate.
+        if preds.ndim == 3:
             preds = np.argmax(preds, axis=-1)
+        preds = _sanitize_token_ids_for_decode(preds, tokenizer)
         labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
-        decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
-        decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
+        labels = _sanitize_token_ids_for_decode(labels, tokenizer)
+        decoded_preds = tokenizer.batch_decode(preds.tolist(), skip_special_tokens=True)
+        decoded_labels = tokenizer.batch_decode(labels.tolist(), skip_special_tokens=True)
         return metric.compute(predictions=decoded_preds, references=decoded_labels, use_stemmer=True)
     return compute_metrics
 
@@ -85,10 +106,19 @@ def main():
     training_cfg = dict(config["training_args"])
     training_cfg.pop("gradient_checkpointing", None)  # handled manually above
     training_cfg["hub_model_id"] = hub_model_id
+    # Eval with predict_with_generate needs explicit caps (defaults are too small / unstable).
+    if "generation_max_length" not in training_cfg:
+        mol = config.get("prompt", {}).get("max_output_length")
+        if mol is not None:
+            training_cfg["generation_max_length"] = mol
+    if "generation_num_beams" not in training_cfg:
+        training_cfg["generation_num_beams"] = config.get("inference", {}).get("num_beams", 4)
+    push_to_hub = training_cfg.get("push_to_hub", False)
+    hub_token = get_token() if push_to_hub else None
 
     training_args = Seq2SeqTrainingArguments(
         **training_cfg,
-        hub_token=HfFolder.get_token(),
+        hub_token=hub_token,
     )
 
     data_collator = DataCollatorForSeq2Seq(tokenizer, model=model)
@@ -98,7 +128,7 @@ def main():
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         data_collator=data_collator,
         compute_metrics=compute_metrics,
     )
@@ -107,9 +137,12 @@ def main():
     trainer.train()
     print("Training complete")
 
-    print(f"Pushing model to Hub: {hub_model_id}")
-    trainer.push_to_hub()
-    print("Model pushed")
+    if push_to_hub:
+        print(f"Pushing model to Hub: {hub_model_id}")
+        trainer.push_to_hub()
+        print("Model pushed")
+    else:
+        print("push_to_hub is false; model saved under output_dir only.")
 
 
 if __name__ == "__main__":

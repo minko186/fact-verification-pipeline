@@ -1,18 +1,13 @@
 """
-Preprocess WiCE (google/wice) into atomic (evidence, claim) pairs and push to HF Hub.
+Preprocess WiCE into atomic (evidence, claim) pairs and push to HF Hub.
 
-WiCE provides fine-grained textual entailment labels at the sub-sentence level.
-Each example contains a claim with annotated subclaims, each mapped to specific
-Wikipedia sentences. This yields the highest-atomicity evidence-claim pairs of any
-public dataset and is ideal as a second-stage fine-tuning source.
-
-Dataset schema (relevant fields):
-  - target: the full claim text
-  - text: the Wikipedia evidence paragraph
-  - chunks: list of {text: str, label: str, sentence_used: list[int]} annotations
+The original google/wice Hub dataset is no longer loadable in many environments.
+This script defaults to jon-tow/wice (config "claim"), which exposes list evidence,
+supporting sentence indices, and claim text.
 
 Usage:
     python preprocess_wice.py --repo minko186/wice-fact-extraction
+    python preprocess_wice.py --save-to-disk /path/to/out
 """
 
 import sys
@@ -28,16 +23,12 @@ from shared.utils.cleaning import remove_special_characters
 def split_into_sentences(text):
     """Rough sentence splitter — returns list of non-empty sentences."""
     import re
-    parts = re.split(r'(?<=[.!?])\s+', text.strip())
+    parts = re.split(r"(?<=[.!?])\s+", text.strip())
     return [p.strip() for p in parts if p.strip()]
 
 
-def process_split(split, labels=("SUPPORTS",)):
-    """
-    For each example, extract individual subclaims from the 'chunks' annotation
-    and pair each with its cited sentence(s) from the evidence paragraph.
-    Emits one {"evidence": str, "claim": str} row per subclaim.
-    """
+def process_google_wice_split(split, labels=("SUPPORTS",)):
+    """Legacy google/wice schema: text, chunks with sentence_used indices."""
     rows = []
     for example in split:
         full_text = example.get("text", "").strip()
@@ -58,7 +49,6 @@ def process_split(split, labels=("SUPPORTS",)):
                 cited = [sentences[i] for i in cited_indices if i < len(sentences)]
                 evidence = " ".join(cited).strip()
             else:
-                # Fall back to the full paragraph if no sentence indices provided
                 evidence = full_text
             evidence = remove_special_characters(evidence)
             subclaim = remove_special_characters(subclaim)
@@ -68,29 +58,83 @@ def process_split(split, labels=("SUPPORTS",)):
     return Dataset.from_list(rows)
 
 
+def process_jon_tow_split(split, labels=("supported", "partially_supported")):
+    """jon-tow/wice claim schema: claim, evidence (list of lines), supporting_sentences."""
+    rows = []
+    for example in split:
+        if example.get("label") not in labels:
+            continue
+        claim = (example.get("claim") or "").strip()
+        ev_lines = example.get("evidence") or []
+        spans = example.get("supporting_sentences") or []
+        if not claim or not spans or not spans[0]:
+            continue
+        idxs = spans[0]
+        if not isinstance(idxs, (list, tuple)):
+            continue
+        parts = []
+        for i in idxs:
+            if isinstance(i, int) and 0 <= i < len(ev_lines):
+                parts.append(str(ev_lines[i]).strip())
+        evidence = " ".join(parts).strip()
+        evidence = remove_special_characters(evidence)
+        claim = remove_special_characters(claim)
+        if evidence and claim:
+            rows.append({"evidence": evidence, "claim": claim})
+    print(f"  -> {len(rows)} (evidence, claim) pairs")
+    return Dataset.from_list(rows)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Preprocess WiCE for fact extraction")
     parser.add_argument("--repo", default="minko186/wice-fact-extraction",
                         help="HF Hub dataset repo to push to")
-    parser.add_argument("--labels", nargs="+", default=["SUPPORTS"],
-                        help="Chunk-level labels to keep")
+    parser.add_argument(
+        "--variant",
+        choices=["jon_tow", "google"],
+        default="jon_tow",
+        help="Data source: jon-tow/wice (default) or legacy google/wice",
+    )
+    parser.add_argument(
+        "--labels",
+        nargs="+",
+        default=None,
+        help="Labels to keep (defaults depend on --variant)",
+    )
+    parser.add_argument(
+        "--save-to-disk",
+        default=None,
+        help="If set, save DatasetDict here instead of pushing to the Hub",
+    )
     args = parser.parse_args()
 
-    print("Loading google/wice...")
-    raw = load_dataset("google/wice")
+    if args.variant == "google":
+        label_tuple = tuple(args.labels or ["SUPPORTS"])
+        print("Loading google/wice...")
+        raw = load_dataset("google/wice")
+        process_fn = lambda split: process_google_wice_split(split, label_tuple)
+    else:
+        label_tuple = tuple(args.labels or ["supported", "partially_supported"])
+        print("Loading jon-tow/wice (config=claim)...")
+        raw = load_dataset("jon-tow/wice", "claim")
+        process_fn = lambda split: process_jon_tow_split(split, label_tuple)
 
     result = DatasetDict()
     for split_name, split in raw.items():
         print(f"Processing split: {split_name}")
-        result[split_name] = process_split(split, tuple(args.labels))
+        result[split_name] = process_fn(split)
 
     print("\nFinal dataset:")
     print(result)
     if "train" in result and len(result["train"]) > 0:
         print("Sample:", result["train"][0])
 
-    print(f"\nPushing to Hub: {args.repo}")
-    result.push_to_hub(args.repo)
+    if args.save_to_disk:
+        print(f"\nSaving to disk: {args.save_to_disk}")
+        result.save_to_disk(args.save_to_disk)
+    else:
+        print(f"\nPushing to Hub: {args.repo}")
+        result.push_to_hub(args.repo)
     print("Done.")
 
 

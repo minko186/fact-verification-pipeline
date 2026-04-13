@@ -47,7 +47,10 @@ def parse_wiki_pages(zip_path, min_length=10, verbose=True):
                     if not raw_line:
                         continue
 
-                    page = json.loads(raw_line)
+                    try:
+                        page = json.loads(raw_line)
+                    except json.JSONDecodeError:
+                        continue
                     title = page.get("id", "")
                     lines_blob = page.get("lines", "")
 

@@ -75,12 +75,22 @@ def process_split(split):
 
 def main():
     parser = argparse.ArgumentParser(description="Preprocess ClaimDecomp for fact extraction")
+    parser.add_argument(
+        "--dataset-id",
+        default="gavulsim/claimdecomp",
+        help="HF dataset id (default gavulsim/claimdecomp; legacy amandaask/ClaimDecomp is often unavailable)",
+    )
     parser.add_argument("--repo", default="minko186/claimdecomp-fact-extraction",
                         help="HF Hub dataset repo to push to")
+    parser.add_argument(
+        "--save-to-disk",
+        default=None,
+        help="If set, save DatasetDict here instead of pushing to the Hub",
+    )
     args = parser.parse_args()
 
-    print("Loading amandaask/ClaimDecomp...")
-    raw = load_dataset("amandaask/ClaimDecomp")
+    print(f"Loading {args.dataset_id}...")
+    raw = load_dataset(args.dataset_id)
 
     result = DatasetDict()
     for split_name, split in raw.items():
@@ -94,8 +104,12 @@ def main():
             print(f"Sample ({split_name}):", result[split_name][0])
             break
 
-    print(f"\nPushing to Hub: {args.repo}")
-    result.push_to_hub(args.repo)
+    if args.save_to_disk:
+        print(f"\nSaving to disk: {args.save_to_disk}")
+        result.save_to_disk(args.save_to_disk)
+    else:
+        print(f"\nPushing to Hub: {args.repo}")
+        result.push_to_hub(args.repo)
     print("Done.")
 
 

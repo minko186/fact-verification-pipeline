@@ -11,14 +11,56 @@ Usage:
 """
 
 import argparse
+import os
 import yaml
-from datasets import load_dataset, concatenate_datasets
+from datasets import load_dataset, load_from_disk, concatenate_datasets, DatasetDict
 from transformers import AutoTokenizer
 
 
 def load_config(config_path="config.yaml"):
     with open(config_path, "r") as f:
         return yaml.safe_load(f)
+
+
+def _datasetdict_to_dataset(ds_dict: DatasetDict):
+    """Merge all splits into one Dataset (train first, then remaining keys)."""
+    keys = list(ds_dict.keys())
+    if "train" in keys:
+        ordered = ["train"] + [k for k in keys if k != "train"]
+    else:
+        ordered = sorted(keys)
+    chunks = [ds_dict[k] for k in ordered]
+    if len(chunks) == 1:
+        return chunks[0]
+    return concatenate_datasets(chunks)
+
+
+def load_one_source(entry):
+    """
+    Load a single dataset from HuggingFace Hub (id) or local disk (path).
+    path may be relative to the config file's directory.
+    """
+    sample_size = entry.get("sample_size", 0)
+    local_path = entry.get("path")
+    if local_path:
+        path = local_path
+        if not os.path.isabs(path):
+            path = os.path.normpath(os.path.join(os.getcwd(), path))
+        print(f"Loading from disk {path}...")
+        raw = load_from_disk(path)
+        if isinstance(raw, DatasetDict):
+            ds = _datasetdict_to_dataset(raw)
+        else:
+            ds = raw
+    else:
+        ds_id = entry["id"]
+        print(f"Loading {ds_id}...")
+        ds = load_dataset(ds_id, split="train")
+
+    if sample_size and sample_size > 0 and sample_size < len(ds):
+        ds = ds.shuffle(seed=42).select(range(sample_size))
+    print(f"  {len(ds)} examples")
+    return ds
 
 
 def load_and_concat(datasets_cfg):
@@ -30,14 +72,7 @@ def load_and_concat(datasets_cfg):
     """
     parts = []
     for entry in datasets_cfg:
-        ds_id = entry["id"]
-        sample_size = entry.get("sample_size", 0)
-        print(f"Loading {ds_id}...")
-        ds = load_dataset(ds_id, split="train")
-        if sample_size and sample_size > 0 and sample_size < len(ds):
-            ds = ds.shuffle(seed=42).select(range(sample_size))
-        print(f"  {len(ds)} examples")
-        parts.append(ds)
+        parts.append(load_one_source(entry))
 
     combined = concatenate_datasets(parts)
     combined = combined.shuffle(seed=42)
@@ -48,13 +83,12 @@ def load_and_concat(datasets_cfg):
 def tokenize(dataset, tokenizer, prompt_template, max_input, max_output):
     """Map tokenization over the dataset using the prompt template from config."""
     def preprocess_function(examples):
-        inputs = [
-            prompt_template.format(evidence=ev)
-            for ev in examples["evidence"]
-        ]
+        evidences = [str(ev) if ev is not None else "" for ev in examples["evidence"]]
+        claims = [str(c) if c is not None else "" for c in examples["claim"]]
+        inputs = [prompt_template.format(evidence=ev) for ev in evidences]
         model_inputs = tokenizer(inputs, max_length=max_input, truncation=True)
         labels = tokenizer(
-            text_target=examples["claim"],
+            text_target=claims,
             max_length=max_output,
             truncation=True,
         )

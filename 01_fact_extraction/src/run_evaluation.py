@@ -6,9 +6,9 @@ and computes ROUGE-1/2/L plus BERTScore. Writes a JSON report to
 ../../experiments/eval_results/<run_name>.json.
 
 Usage:
-    python evaluate.py
-    python evaluate.py --config config.yaml --model-path minko186/flan-t5-base-fact-extraction-v2
-    python evaluate.py --data-path ../../data/processed/fact_extraction/flan-t5-base-fever-vitaminc-wice/eval
+    python run_evaluation.py
+    python run_evaluation.py --config config.yaml --model-path minko186/flan-t5-base-fact-extraction-v2
+    python run_evaluation.py --data-path ../../data/processed/fact_extraction/flan-t5-base-fever-vitaminc-wice/eval
 """
 
 import argparse

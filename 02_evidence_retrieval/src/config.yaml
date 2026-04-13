@@ -5,11 +5,16 @@ corpus:
   min_sentence_length: 10
   use_hf_wikipedia: false
 
+# ── HuggingFace Hub ──────────────────────────────────────────────────────────
+# Pre-built KB artifacts on HF — download once, skip local build.
+hub:
+  kb_repo_id: "minko186/fever-evidence-retrieval-kb"
+  records_dataset_id: "minko186/fever-wiki-sentences"
+
 # ── Index Storage ─────────────────────────────────────────────────────────────
 index:
+  faiss_path:        "../../data/processed/evidence_retrieval/faiss_index.faiss"
   bm25_path:         "../../data/processed/evidence_retrieval/bm25_index.pkl"
-  chroma_path:       "../../data/processed/evidence_retrieval/chroma_db"
-  chroma_collection: "wikipedia_facts"
   graph_path:        "../../data/processed/evidence_retrieval/entity_graph.graphml"
 
 # ── Embedding Model ──────────────────────────────────────────────────────────
